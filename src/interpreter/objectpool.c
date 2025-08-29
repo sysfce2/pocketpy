@@ -7,16 +7,51 @@
 #include <stdbool.h>
 #include <string.h>
 
+void UsedBlockList__ctor(UsedBlockList *self, int capacity) {
+    self->nodes = PK_MALLOC(sizeof(UsedBlockListNode) * (capacity + 1));
+    self->length = 0;
+    self->capacity = capacity;
+
+    for(int i = 0; i < capacity; i++) {
+        self->nodes[i].next = (PoolBlockIndex)(i + 1);
+        self->nodes[i].data = (PoolBlockIndex)-1;
+    }
+    self->nodes[capacity - 1].next = (PoolBlockIndex)-1;
+}
+
+void UsedBlockList__dtor(UsedBlockList *self) {
+    PK_FREE(self->nodes);
+}
+
+UsedBlockListNode* UsedBlockList__malloc(UsedBlockList* self) {
+    assert(self->length < self->capacity);
+    PoolBlockIndex i = self->nodes[0].next;
+    assert(i != (PoolBlockIndex)-1);
+    self->nodes[0].next = self->nodes[i].next;
+    self->length++;
+    return &self->nodes[i];
+}
+
+void UsedBlockList__insert(UsedBlockList *self, PoolBlockIndex data) {
+    UsedBlockListNode* node = UsedBlockList__malloc(self);
+    node->data = data;
+    node->next = self->nodes[0].next;
+    self->nodes[0].next = (PoolBlockIndex)(node - self->nodes);
+}
+
 static PoolArena* PoolArena__new(int block_size) {
     assert(kPoolArenaSize % block_size == 0);
     int block_count = kPoolArenaSize / block_size;
-    PoolArena* self = PK_MALLOC(sizeof(PoolArena) + sizeof(int) * block_count);
+    assert(block_count < (PoolBlockIndex)-1);
+    PoolArena* self = PK_MALLOC(sizeof(PoolArena));
     self->block_size = block_size;
     self->block_count = block_count;
     self->unused_length = block_count;
-    for(int i = 0; i < block_count; i++) {
+    self->unused = PK_MALLOC(sizeof(PoolBlockIndex) * block_count);
+    for(PoolBlockIndex i = 0; i < block_count; i++) {
         self->unused[i] = i;
     }
+    UsedBlockList__ctor(&self->used_blocks, block_count);
     memset(self->data, 0, kPoolArenaSize);
     return self;
 }
@@ -26,12 +61,14 @@ static void PoolArena__delete(PoolArena* self) {
         PyObject* obj = (PyObject*)(self->data + i * self->block_size);
         if(obj->type != 0) PyObject__dtor(obj);
     }
+    PK_FREE(self->unused);
+    UsedBlockList__dtor(&self->used_blocks);
     PK_FREE(self);
 }
 
 static void* PoolArena__alloc(PoolArena* self) {
     assert(self->unused_length > 0);
-    int index = self->unused[self->unused_length - 1];
+    PoolBlockIndex index = self->unused[self->unused_length - 1];
     self->unused_length--;
     return self->data + index * self->block_size;
 }
@@ -39,7 +76,7 @@ static void* PoolArena__alloc(PoolArena* self) {
 static int PoolArena__sweep_dealloc(PoolArena* self) {
     int freed = 0;
     self->unused_length = 0;
-    for(int i = 0; i < self->block_count; i++) {
+    for(PoolBlockIndex i = 0; i < self->block_count; i++) {
         PyObject* obj = (PyObject*)(self->data + i * self->block_size);
         if(obj->type == 0) {
             // free slot
